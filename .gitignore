@@ -1,0 +1,13 @@
+.packer.d/
+packer_cache/
+output-*/
+crash.log
+*.pkr.hcl.lock
+manifest.json
+*.auto.pkrvars.hcl
+*.pkrvars.hcl
+.env
+*.whl
+tests/tmp/
+.DS_Store
+__pycache__/

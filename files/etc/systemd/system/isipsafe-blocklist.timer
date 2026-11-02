@@ -1,0 +1,12 @@
+[Unit]
+Description=Update the isIPsafe blocklist every 30 minutes
+Documentation=https://github.com/isipsafe/isipsafe-digitalocean
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=30min
+RandomizedDelaySec=5min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

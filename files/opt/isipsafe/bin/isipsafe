@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly ENV_FILE="${ISIPSAFE_ENV_FILE:-/etc/isipsafe/env}"
+readonly LIB="${ISIPSAFE_LIB:-/opt/isipsafe/lib/common.sh}"
+
+if [ -z "${ISIPSAFE_API_KEY:-}" ] && [ -r "$ENV_FILE" ]; then
+  # shellcheck source=../lib/common.sh
+  . "$LIB"
+  isipsafe_load_env "$ENV_FILE"
+fi
+exec /opt/isipsafe/venv/bin/isipsafe "$@"

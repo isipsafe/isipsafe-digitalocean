@@ -1,0 +1,29 @@
+#!/bin/sh
+
+env_file=/etc/isipsafe/env
+status_file=/var/lib/isipsafe/status
+
+value() {
+  sed -n "s/^$1=//p" "$2" 2>/dev/null | head -n 1
+}
+
+printf '\nisIPsafe Protected Ubuntu - https://isipsafe.com\n'
+if [ -r "$env_file" ] && grep -qE '^ISIPSAFE_API_KEY=.+' "$env_file"; then
+  printf '  API key     configured\n'
+  if [ -r "$status_file" ]; then
+    result=$(value last_result "$status_file")
+    success=$(value last_success "$status_file")
+    detail=$(value detail "$status_file")
+    if [ "$result" = ok ]; then
+      entries=$(printf '%s' "$detail" | sed -e 's/^block: //' -e 's/, [0-9]* skipped$//')
+      printf '  blocklist   %s (updated %s)\n' "$entries" "$success"
+    else
+      printf '  blocklist   last update failed: %s; last good list %s\n' "$detail" "${success:-never}"
+    fi
+  else
+    printf '  blocklist   waiting for the first update\n'
+  fi
+else
+  printf '  API key     not set. Run /opt/isipsafe/setup.sh (free key: https://isipsafe.com/login)\n'
+fi
+printf '  status      isipsafe-blocklist status | fail2ban-client status sshd | ufw status\n\n'

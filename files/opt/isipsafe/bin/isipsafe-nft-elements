@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Render a list of IP addresses and networks as an atomic nftables set update.
+
+Reads one address or CIDR per line (blank lines and # comments are ignored)
+and prints nft commands that flush and refill the <name>4 and <name>6 sets of
+the isIPsafe table in a single transaction.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ipaddress
+import sys
+from typing import Iterable, List, Sequence, Tuple, Union
+
+Network = Union[ipaddress.IPv4Network, ipaddress.IPv6Network]
+
+EXIT_OK = 0
+EXIT_TOO_FEW = 3
+CHUNK_SIZE = 5000
+BLOCK_MIN_PREFIX = {4: 16, 6: 32}
+
+
+def parse(lines: Iterable[str], public_only: bool) -> Tuple[List[Network], List[Network], int]:
+    v4: List[Network] = []
+    v6: List[Network] = []
+    skipped = 0
+    for raw in lines:
+        text = raw.split("#", 1)[0].strip()
+        if not text:
+            continue
+        token = text.split()[0].strip(",;")
+        try:
+            net = ipaddress.ip_network(token, strict=False)
+        except ValueError:
+            skipped += 1
+            continue
+        if public_only and (not net.is_global or net.prefixlen < BLOCK_MIN_PREFIX[net.version]):
+            skipped += 1
+            continue
+        (v4 if net.version == 4 else v6).append(net)
+    return (
+        list(ipaddress.collapse_addresses(v4)),
+        list(ipaddress.collapse_addresses(v6)),
+        skipped,
+    )
+
+
+def element(net: Network) -> str:
+    full = 32 if net.version == 4 else 128
+    return str(net.network_address) if net.prefixlen == full else str(net)
+
+
+def render(table: str, name: str, v4: Sequence[Network], v6: Sequence[Network]) -> str:
+    out = []
+    for suffix, nets in (("4", v4), ("6", v6)):
+        set_name = f"{name}{suffix}"
+        out.append(f"flush set {table} {set_name}")
+        for start in range(0, len(nets), CHUNK_SIZE):
+            chunk = ", ".join(element(n) for n in nets[start : start + CHUNK_SIZE])
+            out.append(f"add element {table} {set_name} {{ {chunk} }}")
+    return "\n".join(out) + "\n"
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--name", required=True, choices=("allow", "block"), help="set pair to refill")
+    parser.add_argument("--input", required=True, help="address list, or - for stdin")
+    parser.add_argument("--output", default="-", help="nft script to write, or - for stdout")
+    parser.add_argument("--table", default="inet isipsafe")
+    parser.add_argument("--min-entries", type=int, default=0, help="fail when fewer entries remain")
+    args = parser.parse_args(argv)
+
+    if args.input == "-":
+        lines = sys.stdin.read().splitlines()
+    else:
+        with open(args.input, encoding="utf-8", errors="replace") as handle:
+            lines = handle.read().splitlines()
+
+    v4, v6, skipped = parse(lines, public_only=args.name == "block")
+    total = len(v4) + len(v6)
+    print(f"{args.name}: {len(v4)} IPv4 and {len(v6)} IPv6 entries, {skipped} skipped", file=sys.stderr)
+    if total < args.min_entries:
+        print(f"{args.name}: only {total} usable entries, need at least {args.min_entries}", file=sys.stderr)
+        return EXIT_TOO_FEW
+
+    script = render(args.table, args.name, v4, v6)
+    if args.output == "-":
+        sys.stdout.write(script)
+    else:
+        with open(args.output, "w", encoding="utf-8") as handle:
+            handle.write(script)
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

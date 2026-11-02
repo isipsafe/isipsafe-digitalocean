@@ -1,0 +1,15 @@
+#!/bin/bash
+set -euo pipefail
+
+readonly ENV_FILE=/etc/isipsafe/env
+
+if [ -f "$ENV_FILE" ]; then
+  chown root:root "$ENV_FILE"
+  chmod 600 "$ENV_FILE"
+fi
+
+systemctl start isipsafe-firewall.service || true
+
+if [ -r "$ENV_FILE" ] && grep -qE '^ISIPSAFE_API_KEY=.+' "$ENV_FILE"; then
+  /opt/isipsafe/setup.sh --non-interactive
+fi

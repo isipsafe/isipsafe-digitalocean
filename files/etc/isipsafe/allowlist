@@ -1,0 +1,3 @@
+# Addresses and networks that the isIPsafe blocklist must never block, one per line.
+# Your own IP is added here when you run /opt/isipsafe/setup.sh from an SSH session.
+# Apply changes with: systemctl reload isipsafe-firewall

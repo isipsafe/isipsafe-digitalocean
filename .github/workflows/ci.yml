@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  PACKER_IMAGE: hashicorp/packer:1.11.2
+  SHELLCHECK_IMAGE: koalaman/shellcheck:v0.10.0
+
+jobs:
+  packer:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: packer fmt
+        run: docker run --rm -v "$PWD:/work" -w /work "$PACKER_IMAGE" fmt -check -diff isipsafe.pkr.hcl
+      - name: packer init
+        run: docker run --rm -v "$PWD:/work" -w /work -e PACKER_PLUGIN_PATH=/work/.packer.d "$PACKER_IMAGE" init isipsafe.pkr.hcl
+      - name: packer validate (offline, dummy token)
+        run: >-
+          docker run --rm --network none -v "$PWD:/work" -w /work
+          -e PACKER_PLUGIN_PATH=/work/.packer.d -e DIGITALOCEAN_TOKEN=dummy-not-a-real-token
+          "$PACKER_IMAGE" validate isipsafe.pkr.hcl
+
+  shellcheck:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck (project scripts)
+        run: >-
+          docker run --rm -v "$PWD:/mnt" -w /mnt "$SHELLCHECK_IMAGE" -x -P SCRIPTDIR -S style
+          scripts/01-isipsafe.sh scripts/02-hardening.sh
+          files/opt/isipsafe/setup.sh files/opt/isipsafe/lib/common.sh
+          files/opt/isipsafe/bin/isipsafe files/opt/isipsafe/bin/isipsafe-blocklist
+          files/opt/isipsafe/bin/isipsafe-fail2ban-report
+          files/etc/update-motd.d/99-isipsafe
+          files/var/lib/cloud/scripts/per-instance/001_onboot
+          tests/container-test.sh tests/run-in-container.sh tests/systemd-test.sh tests/run-systemd-checks.sh
+      - name: shellcheck (vendored DigitalOcean scripts, warnings only)
+        run: docker run --rm -v "$PWD:/mnt" -w /mnt "$SHELLCHECK_IMAGE" -S warning scripts/90-cleanup.sh scripts/99-img-check.sh
+      - name: vendored scripts are unmodified
+        run: |
+          echo "5e2fe7ce30892a26ed2731238d9f26c40ae8b1084b070ce095f3b99ab1a2cc81  scripts/90-cleanup.sh" | sha256sum -c -
+          echo "91ff2b1880439c97ccdc49554c5ed8901b89ef250c8ac5fffe52811c68abac49  scripts/99-img-check.sh" | sha256sum -c -
+      - name: python syntax
+        run: python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' files/opt/isipsafe/bin/isipsafe-nft-elements
+
+  container:
+    runs-on: ubuntu-24.04
+    needs: [shellcheck]
+    steps:
+      - uses: actions/checkout@v4
+      - name: provisioning test in ubuntu:24.04
+        run: ./tests/container-test.sh
+
+  systemd:
+    runs-on: ubuntu-24.04
+    needs: [shellcheck]
+    steps:
+      - uses: actions/checkout@v4
+      - name: provisioning test with systemd as PID 1
+        run: ./tests/systemd-test.sh

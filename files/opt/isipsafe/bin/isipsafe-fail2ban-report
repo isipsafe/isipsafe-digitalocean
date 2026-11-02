@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+readonly ENV_FILE="${ISIPSAFE_ENV_FILE:-/etc/isipsafe/env}"
+readonly CLI="${ISIPSAFE_CLI:-/opt/isipsafe/venv/bin/isipsafe}"
+readonly LIB="${ISIPSAFE_LIB:-/opt/isipsafe/lib/common.sh}"
+
+# shellcheck source=../lib/common.sh
+. "$LIB"
+
+notify() {
+  logger -t isipsafe-fail2ban -p "authpriv.$1" -- "$2" 2>/dev/null || printf '%s\n' "$2" >&2
+}
+
+ip="${1:-}"
+categories="${2:-ssh,brute-force}"
+jail="${3:-}"
+failures="${4:-}"
+
+if [ -z "$ip" ]; then
+  echo "usage: isipsafe-fail2ban-report IP [CATEGORIES] [JAIL] [FAILURES]" >&2
+  exit 0
+fi
+
+isipsafe_load_env "$ENV_FILE"
+if [ -z "${ISIPSAFE_API_KEY:-}" ] || ! isipsafe_enabled "${ISIPSAFE_REPORT:-yes}"; then
+  exit 0
+fi
+
+[[ "$jail" =~ ^[A-Za-z0-9_.-]{1,64}$ ]] || jail="fail2ban"
+comment="Banned by fail2ban, jail $jail"
+if [[ "$failures" =~ ^[0-9]{1,6}$ ]]; then
+  comment="$comment, $failures failed attempts"
+fi
+
+args=(--timeout 10)
+if [ -n "${ISIPSAFE_BASE_URL:-}" ]; then
+  args+=(--base-url "$ISIPSAFE_BASE_URL")
+fi
+args+=(report "$ip" -c "$categories" -m "$comment")
+
+if output="$(timeout 30 "$CLI" "${args[@]}" 2>&1)"; then
+  notify info "$output"
+else
+  notify warning "could not report $ip to isIPsafe: $output"
+fi
+exit 0

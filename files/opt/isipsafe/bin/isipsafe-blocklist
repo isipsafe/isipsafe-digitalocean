@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+readonly ENV_FILE="${ISIPSAFE_ENV_FILE:-/etc/isipsafe/env}"
+readonly BASE_RULES="${ISIPSAFE_BASE_RULES:-/etc/isipsafe/isipsafe.nft}"
+readonly ALLOWLIST="${ISIPSAFE_ALLOWLIST:-/etc/isipsafe/allowlist}"
+readonly STATE_DIR="${ISIPSAFE_STATE_DIR:-/var/lib/isipsafe}"
+readonly CLI="${ISIPSAFE_CLI:-/opt/isipsafe/venv/bin/isipsafe}"
+readonly PYTHON="${ISIPSAFE_PYTHON:-/opt/isipsafe/venv/bin/python3}"
+readonly RENDER="${ISIPSAFE_RENDER:-/opt/isipsafe/bin/isipsafe-nft-elements}"
+readonly NFT="${NFT:-nft}"
+readonly LIB="${ISIPSAFE_LIB:-/opt/isipsafe/lib/common.sh}"
+readonly FAMILY=inet
+readonly NAME=isipsafe
+readonly CACHE="$STATE_DIR/blocklist.nft"
+readonly STATUS_FILE="$STATE_DIR/status"
+
+# shellcheck source=../lib/common.sh
+. "$LIB"
+
+log() {
+  printf 'isipsafe-blocklist: %s\n' "$*" >&2
+}
+
+usage() {
+  cat <<'EOF'
+Usage: isipsafe-blocklist COMMAND
+
+  start     create the nftables table, load the allowlist and the last good blocklist
+  update    download the blocklist and swap it in; keep the old one on any error
+  allowlist reload /etc/isipsafe/allowlist
+  stop      remove the nftables table (nothing is blocked any more)
+  status    show the last update and the drop counters
+EOF
+}
+
+write_status() {
+  local result="$1" detail="$2" tmp
+  tmp="$(mktemp "$STATE_DIR/.status.XXXXXX")"
+  {
+    printf 'last_attempt=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'last_result=%s\n' "$result"
+    printf 'detail=%s\n' "$detail"
+    if [ "$result" = ok ]; then
+      printf 'last_success=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    elif [ -r "$STATUS_FILE" ]; then
+      grep '^last_success=' "$STATUS_FILE" || true
+    fi
+  } >"$tmp"
+  chmod 644 "$tmp"
+  mv -f "$tmp" "$STATUS_FILE"
+}
+
+table_exists() {
+  "$NFT" list table "$FAMILY" "$NAME" >/dev/null 2>&1
+}
+
+render_allowlist() {
+  local out="$1"
+  if [ -r "$ALLOWLIST" ]; then
+    "$PYTHON" -I "$RENDER" --name allow --input "$ALLOWLIST" --output "$out"
+  else
+    "$PYTHON" -I "$RENDER" --name allow --input /dev/null --output "$out"
+  fi
+}
+
+cmd_start() {
+  render_allowlist "$WORK/allow.nft"
+  {
+    printf 'add table %s %s\ndelete table %s %s\n' "$FAMILY" "$NAME" "$FAMILY" "$NAME"
+    cat "$BASE_RULES"
+    cat "$WORK/allow.nft"
+  } >"$WORK/base.nft"
+
+  if [ -s "$CACHE" ] && cat "$WORK/base.nft" "$CACHE" >"$WORK/full.nft" && "$NFT" -c -f "$WORK/full.nft"; then
+    "$NFT" -f "$WORK/full.nft"
+    log "table loaded with the last good blocklist"
+  else
+    "$NFT" -c -f "$WORK/base.nft"
+    "$NFT" -f "$WORK/base.nft"
+    log "table loaded; no saved blocklist yet"
+  fi
+}
+
+cmd_stop() {
+  if table_exists; then
+    "$NFT" delete table "$FAMILY" "$NAME"
+  fi
+  log "table removed"
+}
+
+cmd_allowlist() {
+  table_exists || {
+    cmd_start
+    return
+  }
+  render_allowlist "$WORK/allow.nft"
+  "$NFT" -c -f "$WORK/allow.nft"
+  "$NFT" -f "$WORK/allow.nft"
+}
+
+download() {
+  local out="$1"
+  local -a args=(--timeout 30)
+  if [ -n "${ISIPSAFE_BASE_URL:-}" ]; then
+    args+=(--base-url "$ISIPSAFE_BASE_URL")
+  fi
+  args+=(blocklist --format txt -o "$out"
+    --confidence-minimum "${ISIPSAFE_BLOCKLIST_CONFIDENCE:-90}"
+    --days "${ISIPSAFE_BLOCKLIST_DAYS:-30}"
+    --limit "${ISIPSAFE_BLOCKLIST_LIMIT:-10000}")
+  if [ -n "${ISIPSAFE_BLOCKLIST_EXCEPT_COUNTRIES:-}" ]; then
+    args+=(--except-countries "$ISIPSAFE_BLOCKLIST_EXCEPT_COUNTRIES")
+  fi
+  "$CLI" "${args[@]}"
+}
+
+cmd_update() {
+  isipsafe_load_env "$ENV_FILE"
+  if [ -z "${ISIPSAFE_API_KEY:-}" ]; then
+    log "no API key in $ENV_FILE; run /opt/isipsafe/setup.sh. Skipping."
+    return 0
+  fi
+  if ! isipsafe_enabled "${ISIPSAFE_BLOCKLIST:-yes}"; then
+    log "blocklist disabled in $ENV_FILE. Skipping."
+    return 0
+  fi
+
+  table_exists || cmd_start
+
+  local summary
+
+  if ! download "$WORK/blocklist.txt"; then
+    log "download failed; keeping the previous blocklist"
+    write_status error "download failed"
+    return 1
+  fi
+  if ! summary="$("$PYTHON" -I "$RENDER" --name block --min-entries 1 \
+    --input "$WORK/blocklist.txt" --output "$WORK/block.nft" 2>&1)"; then
+    log "$summary"
+    log "blocklist rejected; keeping the previous blocklist"
+    write_status error "blocklist rejected: ${summary//$'\n'/; }"
+    return 1
+  fi
+  if ! "$NFT" -c -f "$WORK/block.nft"; then
+    log "nft rejected the new blocklist; keeping the previous blocklist"
+    write_status error "nft rejected the blocklist"
+    return 1
+  fi
+  "$NFT" -f "$WORK/block.nft"
+  install -m 600 "$WORK/block.nft" "$CACHE"
+  write_status ok "$summary"
+  log "$summary"
+}
+
+cmd_status() {
+  if [ -r "$STATUS_FILE" ]; then
+    cat "$STATUS_FILE"
+  else
+    echo "no update has run yet"
+  fi
+  if table_exists; then
+    "$NFT" list chain "$FAMILY" "$NAME" input
+  else
+    echo "nftables table $FAMILY $NAME is not loaded"
+  fi
+}
+
+main() {
+  if [ "$(id -u)" -ne 0 ] && [ -z "${ISIPSAFE_ALLOW_NON_ROOT:-}" ]; then
+    log "must run as root"
+    exit 1
+  fi
+  install -d -m 700 "$STATE_DIR"
+  WORK="$(mktemp -d)"
+  trap 'rm -rf "$WORK"' EXIT
+  case "${1:-}" in
+    start) cmd_start ;;
+    stop) cmd_stop ;;
+    update) cmd_update ;;
+    allowlist | reload) cmd_allowlist ;;
+    status) cmd_status ;;
+    -h | --help | help) usage ;;
+    *)
+      usage >&2
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,31 @@
+table inet isipsafe {
+	set allow4 {
+		type ipv4_addr
+		flags interval
+	}
+
+	set allow6 {
+		type ipv6_addr
+		flags interval
+	}
+
+	set block4 {
+		type ipv4_addr
+		flags interval
+	}
+
+	set block6 {
+		type ipv6_addr
+		flags interval
+	}
+
+	chain input {
+		type filter hook input priority filter - 10; policy accept;
+		ct state established,related accept
+		iif "lo" accept
+		ip saddr @allow4 accept
+		ip6 saddr @allow6 accept
+		ip saddr @block4 counter drop
+		ip6 saddr @block6 counter drop
+	}
+}

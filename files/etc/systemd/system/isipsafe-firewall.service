@@ -1,0 +1,18 @@
+[Unit]
+Description=isIPsafe blocklist nftables table
+Documentation=https://github.com/isipsafe/isipsafe-digitalocean
+DefaultDependencies=no
+Wants=network-pre.target local-fs.target
+After=local-fs.target ufw.service
+Before=network-pre.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/isipsafe/bin/isipsafe-blocklist start
+ExecReload=/opt/isipsafe/bin/isipsafe-blocklist allowlist
+ExecStop=/opt/isipsafe/bin/isipsafe-blocklist stop
+
+[Install]
+WantedBy=multi-user.target
